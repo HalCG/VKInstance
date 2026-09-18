@@ -1,0 +1,60 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Vulkan_Anti_Aliasing (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/run/Debug/Vulkan_Anti_Aliasing/Vulkan_Anti_Aliasing.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/run/Debug/Vulkan_Anti_Aliasing",
+            "preLaunchTask": "Build: MSVC 2026 (Anti-Aliasing)",
+            "stopAtEntry": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Vulkan_Rendering_Paths (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/run/Debug/Vulkan_Rendering_Paths/Vulkan_Rendering_Paths.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/run/Debug/Vulkan_Rendering_Paths",
+            "preLaunchTask": "Build: MSVC 2026 (Rendering Paths)",
+            "stopAtEntry": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Vulkan_OIT_Depth_Peeling (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/run/Debug/Vulkan_OIT_Depth_Peeling/Vulkan_OIT_Depth_Peeling.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/run/Debug/Vulkan_OIT_Depth_Peeling",
+            "preLaunchTask": "Build: MSVC 2026 (OIT Depth Peeling)",
+            "stopAtEntry": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Vulkan_OIT_Linked_list (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/run/Debug/Vulkan_OIT_Linked_list/Vulkan_OIT_Linked_list.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/run/Debug/Vulkan_OIT_Linked_list",
+            "preLaunchTask": "Build: MSVC 2026 (OIT Linked List)",
+            "stopAtEntry": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Vulkan_OIT_Stochastic_Transparency (Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/run/Debug/Vulkan_OIT_Stochastic_Transparency/Vulkan_OIT_Stochastic_Transparency.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/run/Debug/Vulkan_OIT_Stochastic_Transparency",
+            "preLaunchTask": "Build: MSVC 2026 (OIT Stochastic)",
+            "stopAtEntry": false,
+            "console": "integratedTerminal"
+        }
+    ]
+}

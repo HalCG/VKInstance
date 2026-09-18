@@ -1,0 +1,74 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+
+// 线程组尺寸配置：8x8 = 64 个线程/Group，用于二维全屏像素并行清空
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ==============================================================================
+// 描述符绑定定义 (Set = 0)
+// ==============================================================================
+
+// 绑定 0：当前帧调度与间接绘制参数 Buffer (sWorkArgs[0])
+// 结构包含 VkDrawIndirectCommand (16字节) + NodeOffset/Count 参数
+layout(std430, set = 0, binding = 0) buffer FCurrentIndirectWorkArgs {
+    uint mData[];
+} CurrentIndirectWorkArgs;
+
+// 绑定 1：Ping-Pong 下一阶段间接调度缓冲 (sWorkArgs[1])
+layout(std430, set = 0, binding = 1) buffer FNextIndirectWorkArgs {
+    uint mData[];
+} NextIndirectWorkArgs;
+
+// 绑定 2：64 位 Visibility Buffer (VisBuffer64)
+// 高 32 位为 0xFFFFFFFF (初始最大深度值 1.0f 的 64 位整型位表示)
+// 低 32 位为 0x0 (Cluster Index)
+layout(std430, set = 0, binding = 2) buffer FVisBuffer64 {
+    uint64_t mData[];
+} VisBuffer64;
+
+// Misc0.xy = 画布宽高（像素），由 scene.cpp 每帧写入 GlobalConstants
+layout(set = 0, binding = 3) uniform GlobalConstants {
+    mat4 ProjectionMatrix;
+    mat4 ViewMatrix;
+    mat4 ModelMatrix;
+    uvec4 Misc0;
+    vec4 CameraPositionWS;
+    vec4 ViewDirectionWS;
+};
+
+void main() {
+    ivec2 texcoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 canvasSize = ivec2(Misc0.x, Misc0.y);
+
+    if (any(greaterThanEqual(texcoord, canvasSize))) {
+        return;
+    }
+
+    // 单线程 (0,0) 负责重置间接绘制与 Ping-Pong 计数的初始状态
+    if (texcoord.x == 0 && texcoord.y == 0) {
+        // 重置 CurrentIndirectWorkArgs:
+        // [0] = vertexCount = 384 (128 个三角形 * 3 顶点)
+        // [1] = instanceCount = 0 (待 Cull 计算阶段累加可见簇数量)
+        // [2] = firstVertex = 0
+        // [3] = firstInstance = 0
+        // [5] = nodeOffset = 0 (根节点偏移)
+        // [6] = nodeCount = 1 (根节点数量为 1)
+        CurrentIndirectWorkArgs.mData[0] = 384; 
+        CurrentIndirectWorkArgs.mData[1] = 0;   
+        CurrentIndirectWorkArgs.mData[2] = 0;   
+        CurrentIndirectWorkArgs.mData[3] = 0;   
+        CurrentIndirectWorkArgs.mData[5] = 0;   
+        CurrentIndirectWorkArgs.mData[6] = 1;   
+
+        // 同步重置 NextIndirectWorkArgs
+        NextIndirectWorkArgs.mData[0] = 384;
+        NextIndirectWorkArgs.mData[1] = 0;
+        NextIndirectWorkArgs.mData[2] = 0;
+        NextIndirectWorkArgs.mData[3] = 0;
+        NextIndirectWorkArgs.mData[5] = 0;
+        NextIndirectWorkArgs.mData[6] = 1;
+    }
+
+    int pixelIndex = texcoord.y * int(Misc0.x) + texcoord.x;
+    VisBuffer64.mData[pixelIndex] = 0xFFFFFFFF00000000ul;
+}

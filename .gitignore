@@ -1,0 +1,66 @@
+# =============================================================================
+# 11_VkInstance — Git 忽略规则
+# 源码、CMake、GLSL、资源模型提交；构建产物与运行目录不提交
+# =============================================================================
+
+# --- CMake Preset 统一构建目录 ---
+build/
+build_test/
+out/
+run/
+
+# --- 子目录内误生成的 CMake/MSBuild 残留（勿在子项目根单独 cmake -B build）---
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/DartConfiguration.tcl
+**/Testing/
+
+# --- 可执行文件与动态库 ---
+*.exe
+*.dll
+*.pdb
+
+# --- 编译中间产物（*.obj 排除 resources/ 下的 Wavefront 网格）---
+*.obj
+!**/resources/**/*.obj
+*.iobj
+*.ipdb
+*.ilk
+*.exp
+*.idb
+*.ipch
+*.tlog
+*.lastbuildstate
+*.recipe
+
+# --- 静态库（仅出现在 out/，显式忽略以防散落）---
+*.lib
+
+# --- SPIR-V（由 glslc 构建；只提交 .vert/.frag/.comp/.glsl 源）---
+*.spv
+
+# --- Visual Studio / MSVC 本地状态 ---
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+*.opendb
+
+# --- 工具链生成 / 日志 / 临时文本 ---
+compile_commands.json
+*.log
+*.tmp
+*.cache
+err.txt
+log.txt
+
+# --- IDE 本地（不提交；.vscode/tasks.json、launch.json 需提交）---
+.cursor/
+
+# --- Nanite 独立构建产物（保留 .sln / .vcxproj / GLSL 源）---
+Vulkan_NaniteInUE5.5.4/NaniteVulkan.exe

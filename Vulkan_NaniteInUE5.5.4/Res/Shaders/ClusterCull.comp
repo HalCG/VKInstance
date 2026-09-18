@@ -1,0 +1,139 @@
+#version 450
+
+// 单线程组驱动 Cluster 剔除与 VkDrawIndirectCommand 生成
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// ==============================================================================
+// 描述符绑定定义 (Set = 0)
+// ==============================================================================
+
+// 绑定 0：全局 Matrix 与 Camera 矩阵 UBO
+layout(set = 0, binding = 0) uniform GlobalConstants {
+    mat4 ProjectionMatrix;
+    mat4 ViewMatrix;
+    mat4 ModelMatrix;
+    uvec4 Misc0;
+    vec4 CameraPositionWS;
+    vec4 ViewDirectionWS;
+};
+
+// 绑定 1：Nanite 原始顶点与 Cluster 数据 SSBO
+layout(std430, set = 0, binding = 1) buffer FNaniteMesh {
+    uint mData[];
+} NaniteMesh;
+
+// 绑定 2：GPU 间接绘制命令 Buffer (IndirectWorkArgs / sWorkArgs[0])
+layout(std430, set = 0, binding = 2) buffer FIndirectWorkArgs {
+    uint mData[];
+} IndirectWorkArgs;
+
+// 绑定 3：筛选出的最终可见 Cluster 列表 SSBO (uvec2: x=pageIndex, y=clusterIndex)
+layout(std430, set = 0, binding = 3) buffer FVisiableClusterSWHW {
+    uvec2 mData[];
+} VisiableClusterSWHW;
+
+// 绑定 4：节点批次与可见簇收集缓冲
+layout(std430, set = 0, binding = 4) buffer FMainAndPostNodeAndClusterBatches {
+    uint mData[];
+} MainAndPostNodeAndClusterBatches;
+
+// 簇元数据解包结构
+struct ClusterInfo {
+    uint mBaseOffset;
+    uint mIndexOffset;
+    uint mIndexCount;
+    vec4 mLODBounds;
+    float mLODError;
+    float mEdgeLength;
+};
+
+// 从 NaniteMesh SSBO 解析指定 pageIndex 与 clusterIndex 的具体 Cluster 数据
+ClusterInfo GetClusterInfo(uint inPageIndex, uint inClusterIndex) {
+    uint pageCount = NaniteMesh.mData[0];
+    uint pageBaseOffsetInBytes = NaniteMesh.mData[1 + inPageIndex];
+    uint pageBaseOffset = pageBaseOffsetInBytes / 4;
+    uint clusterCountOnPage = NaniteMesh.mData[pageBaseOffset];
+    uint clusterBaseOffsetInBytes = NaniteMesh.mData[pageBaseOffset + 1 + inClusterIndex];
+    uint clusterBaseOffset = pageBaseOffset + 1 + clusterCountOnPage + clusterBaseOffsetInBytes / 4;
+    uint clusterIndexOffset = NaniteMesh.mData[clusterBaseOffset] / 4;
+    uint clusterIndexCount = NaniteMesh.mData[clusterBaseOffset + 1];
+    uvec4 lodBounds = uvec4(
+        NaniteMesh.mData[clusterBaseOffset + 2u],
+        NaniteMesh.mData[clusterBaseOffset + 3u],
+        NaniteMesh.mData[clusterBaseOffset + 4u],
+        NaniteMesh.mData[clusterBaseOffset + 5u]
+    );
+    uint lodErrorAndEdgeLength = NaniteMesh.mData[clusterBaseOffset + 6];
+    ClusterInfo clusterInfo;
+    clusterInfo.mBaseOffset = clusterBaseOffset;
+    clusterInfo.mIndexOffset = clusterIndexOffset;
+    clusterInfo.mIndexCount = clusterIndexCount;
+    clusterInfo.mLODBounds = uintBitsToFloat(lodBounds);
+    vec2 unpackedData  = unpackHalf2x16(lodErrorAndEdgeLength);
+    clusterInfo.mLODError = unpackedData.x;
+    clusterInfo.mEdgeLength = unpackedData.y;
+    return clusterInfo;
+}
+
+// 计算投影缩放尺寸
+vec2 GetProjectionScales(vec4 Bounds) {
+	if (ProjectionMatrix[3][3] >= 1.0f) {
+		return vec2(1,1);
+	}
+	vec3 Center = Bounds.xyz;
+	float Radius = Bounds.w;
+
+	float ZNear = 10.0f;
+	float DistToClusterSq = dot(Center, Center);	
+	
+	float Z = dot(ViewDirectionWS.xyz, Center);
+	float XSq = DistToClusterSq - Z * Z;
+	float X = sqrt(max(0.0f, XSq));
+	float DistToTSq = DistToClusterSq - Radius * Radius;
+	float DistToT = sqrt(max(0.0f, DistToTSq));
+	float ScaledCosTheta = DistToT;
+	float ScaledSinTheta = Radius;
+	float ScaleToUnit = 1.0f / DistToClusterSq;
+	float By = (ScaledSinTheta * X + ScaledCosTheta * Z) * ScaleToUnit;
+	float Ty = (-ScaledSinTheta * X + ScaledCosTheta * Z) * ScaleToUnit;
+	
+	float MinZ = max(Z - Radius, ZNear);
+	float MaxZ = max(Z + Radius, ZNear);
+	float MinCosAngle = Ty;
+	float MaxCosAngle = By;
+
+	if (Z + Radius > ZNear)
+		return vec2(MinZ * MinCosAngle, MaxZ * MaxCosAngle);
+	else
+		return vec2(0.0f, 0.0f);
+}
+
+void main() {
+    uint clusterCount = IndirectWorkArgs.mData[1];
+    uint visiableClusterCount = 0;
+
+    // 细粒度 Cluster 遍历与视角 LOD 误差精准剔除
+    for (uint i = 0; i < clusterCount; i++) { 
+        uint pageIndex = MainAndPostNodeAndClusterBatches.mData[1024 + i * 2];
+        uint clusterIndex = MainAndPostNodeAndClusterBatches.mData[1024 + i * 2 + 1];
+        
+        ClusterInfo clusterInfo = GetClusterInfo(pageIndex, clusterIndex);
+        vec3 boundingSphere = clusterInfo.mLODBounds.xyz;
+        vec4 boundingSphereWS = ModelMatrix * vec4(boundingSphere, 1.0f);
+        boundingSphereWS.xyz = boundingSphereWS.xyz - CameraPositionWS.xyz;
+        
+        vec2 projectionScales = GetProjectionScales(vec4(boundingSphereWS.xyz, clusterInfo.mLODBounds.w));
+        float lodScale = CameraPositionWS.w;
+        
+        // 判定 Cluster 屏幕投影误差是否小于阈值
+        if (projectionScales.x > clusterInfo.mLODError * lodScale) {
+            // 通过筛选，收集写入 VisiableClusterSWHW SSBO
+            VisiableClusterSWHW.mData[visiableClusterCount] = uvec2(pageIndex, clusterIndex);
+            visiableClusterCount++;
+        }
+    }
+    
+    // 更新 VkDrawIndirectCommand 中的 instanceCount 字段
+    // 使得硬件光栅化 Pass (vkCmdDrawIndirect) 能够直接以 instanceCount 数量实例化绘制所有可见 Cluster
+    IndirectWorkArgs.mData[1] = visiableClusterCount;
+}

@@ -1,0 +1,69 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+
+// 8x8 线程组全屏像素并行 Compute Shader
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// 绑定 0：64位 VisBuffer64 SSBO
+layout(std430, set = 0, binding = 0) buffer FVisBuffer64 {
+    uint64_t mData[];
+} VisBuffer64;
+
+// 绑定 1：2D 存储图像 VisualizationTexture (RGBA32F 格式)
+layout(set = 0, binding = 1, rgba32f) uniform image2D VisualizationTexture;
+
+layout(set = 0, binding = 2) uniform GlobalConstants {
+    mat4 ProjectionMatrix;
+    mat4 ViewMatrix;
+    mat4 ModelMatrix;
+    uvec4 Misc0;
+    vec4 CameraPositionWS;
+    vec4 ViewDirectionWS;
+};
+
+// MurmurHash 杂凑散列函数：根据 Cluster Index 生成高对比度随机伪彩
+uint MurmurMix(uint Hash) {
+	Hash ^= Hash >> 16;
+	Hash *= 0x85ebca6b;
+	Hash ^= Hash >> 13;
+	Hash *= 0xc2b2ae35;
+	Hash ^= Hash >> 16;
+	return Hash;
+}
+
+// 将数字 ID 转换为 RGB 伪彩色向量
+vec3 IntToColor(uint Index) {
+	uint Hash = MurmurMix(Index);
+	vec3 Color = vec3(
+		(Hash >>  0) & 255,
+		(Hash >>  8) & 255,
+		(Hash >> 16) & 255
+	);
+	return Color * (1.0f / 255.0f);
+}
+
+void main() {
+    ivec2 texcoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    ivec2 canvasSize = ivec2(Misc0.x, Misc0.y);
+    if (any(greaterThanEqual(texcoord, canvasSize))) {
+        return;
+    }
+    
+    int pixelIndex = texcoord.x + texcoord.y * int(Misc0.x);
+    uint64_t pixelValue64 = VisBuffer64.mData[pixelIndex];
+    uint pixelValue = uint(pixelValue64); // 提取低 32 位 (ClusterID 数据)
+    
+    // 默认背景色 (深灰蓝)
+    vec3 color = vec3(0.1f, 0.4f, 0.6f);
+    
+    // 若当前像素被 Nanite 三角形覆盖
+    if (pixelValue != 0) {
+        uint clusterIndex = (pixelValue & 0xFFu) - 1;
+        color = IntToColor(clusterIndex);
+        color = color * 0.8 + 0.2; // 调整亮度对比度
+    }
+    
+    // 将最终渲染颜色写入 2D Storage Image 存储图像
+    imageStore(VisualizationTexture, texcoord, vec4(color, 1.0f));
+}

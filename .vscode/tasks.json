@@ -1,0 +1,108 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure MSVC 2026",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--preset", "x64-msvc-2026"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Build: MSVC 2026 (All)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build: MSVC 2026 (Anti-Aliasing)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug",
+                "--target",
+                "Vulkan_Anti_Aliasing"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build: MSVC 2026 (Rendering Paths)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug",
+                "--target",
+                "Vulkan_Rendering_Paths"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build: MSVC 2026 (OIT Depth Peeling)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug",
+                "--target",
+                "Vulkan_OIT_Depth_Peeling"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build: MSVC 2026 (OIT Linked List)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug",
+                "--target",
+                "Vulkan_OIT_Linked_list"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build: MSVC 2026 (OIT Stochastic)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/out/build/x64-msvc-2026",
+                "--config",
+                "Debug",
+                "--target",
+                "Vulkan_OIT_Stochastic_Transparency"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        }
+    ]
+}

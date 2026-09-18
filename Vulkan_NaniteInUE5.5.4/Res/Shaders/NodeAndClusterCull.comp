@@ -1,0 +1,212 @@
+#version 450
+
+// 单线程组驱动 Node 遍历 (匹配 UE5 Nanite 单 Pass 级联节点展开逻辑)
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// ==============================================================================
+// Nanite BVH 层次数据结构常量与位域定义 (匹配 UE5.5.4 NaniteDefinitions.h)
+// ==============================================================================
+#define NANITE_MAX_BVH_NODE_FANOUT_BITS		2
+#define NANITE_MAX_BVH_NODE_FANOUT_MASK		((1 << NANITE_MAX_BVH_NODE_FANOUT_BITS)-1)
+#define NANITE_MAX_BVH_NODE_FANOUT			(1 << NANITE_MAX_BVH_NODE_FANOUT_BITS) // 每个节点最多 4 个子分支 (4-ary BVH)
+
+#define NANITE_MAX_CLUSTERS_PER_GROUP_BITS	9
+#define NANITE_MAX_CLUSTERS_PER_GROUP_MASK	((1 << NANITE_MAX_CLUSTERS_PER_GROUP_BITS) - 1)
+#define NANITE_MAX_CLUSTERS_PER_GROUP		((1 << NANITE_MAX_CLUSTERS_PER_GROUP_BITS) - 1)
+
+#define NANITE_MAX_GROUP_PARTS_BITS							5
+#define NANITE_MAX_GROUP_PARTS_MASK							((1 << NANITE_MAX_GROUP_PARTS_BITS) - 1)
+#define NANITE_MAX_GROUP_PARTS								(1 << NANITE_MAX_GROUP_PARTS_BITS)
+
+#define NANITE_MAX_RESOURCE_PAGES_BITS						16
+#define NANITE_MAX_RESOURCE_PAGES_MASK						((1 << NANITE_MAX_RESOURCE_PAGES_BITS) - 1)
+#define NANITE_MAX_RESOURCE_PAGES							(1 << NANITE_MAX_RESOURCE_PAGES_BITS)
+
+// ==============================================================================
+// 描述符绑定定义 (Set = 0)
+// ==============================================================================
+
+// 绑定 0：全局 View/Proj 矩阵与 LODScale 常量 UBO
+layout(set = 0, binding = 0) uniform GlobalConstants {
+    mat4 ProjectionMatrix;
+    mat4 ViewMatrix;
+    mat4 ModelMatrix;
+    uvec4 Misc0;
+    vec4 CameraPositionWS; // xyz: 摄像机世界坐标, w: LODScale
+    vec4 ViewDirectionWS;  // xyz: 摄像机朝向, w: LODScaleHW
+};
+
+// 打包的 4 分支 BVH 节点结构
+struct FPackedHierarchyNode {
+    uvec4 LODBounds[NANITE_MAX_BVH_NODE_FANOUT];
+    uvec4 Misc0[NANITE_MAX_BVH_NODE_FANOUT];
+    uvec4 Misc1[NANITE_MAX_BVH_NODE_FANOUT];
+    uint Misc2[NANITE_MAX_BVH_NODE_FANOUT];
+};
+
+// 绑定 1：BVH 层次节点 SSBO
+layout(std430, set = 0, binding = 1) buffer FBVH {
+    FPackedHierarchyNode mData[];
+} BVH;
+
+// 绑定 2：当前轮次的间接调度参数缓冲 (CurrentWorkArgs)
+layout(std430, set = 0, binding = 2) buffer FCurrentIndirectWorkArgs {
+    uint mData[];
+} CurrentIndirectWorkArgs;
+
+// 绑定 3：下一轮次的间接调度参数缓冲 (NextWorkArgs)
+layout(std430, set = 0, binding = 3) buffer FNextIndirectWorkArgs {
+    uint mData[];
+} NextIndirectWorkArgs;
+
+// 绑定 4：节点批次与可见簇收集缓冲 (MainAndPostNodeAndClusterBatches)
+layout(std430, set = 0, binding = 4) buffer FMainAndPostNodeAndClusterBatches {
+    uint mData[];
+} MainAndPostNodeAndClusterBatches;
+
+// 解包后的单个 BVH 节点切片结构
+struct FHierarchyNodeSlice {
+	vec4	LODBounds;           // xyz: 视锥体包围球中心, w: 包围球半径
+	vec3	BoxBoundsCenter;     // AABB 中心
+	vec3	BoxBoundsExtent;     // AABB 范围
+	float	MinLODError;         // 当前节点最小 LOD 误差
+	float	MaxParentLODError;   // 父节点最大 LOD 误差
+	uint	ChildStartReference; // 子节点引用或叶子 Cluster 索引
+	uint	NumChildren;         // 子节点数量
+	uint	StartPageIndex;      // 资源页起始索引
+	uint	NumPages;            // 资源页数量
+	bool	bEnabled;            // 是否有效
+	bool	bLoaded;             // 是否已加载
+	bool	bLeaf;               // 是否为叶子节点
+};
+
+// 位域提取辅助工具函数
+uint BitFieldExtractU32(uint Data, uint Size, uint Offset) {
+	Size &= 31;
+	Offset &= 31;
+	return (Data >> Offset) & ((1u << Size) - 1u);
+}
+
+// 解包二进制 compressed bitfield 的 HierarchyNodeSlice
+FHierarchyNodeSlice UnpackHierarchyNodeSlice(uvec4 RawData0, uvec4 RawData1, uvec4 RawData2, uint RawData3) {
+	const uvec4 Misc0 = RawData1;
+	const uvec4 Misc1 = RawData2;
+	const uint  Misc2 = RawData3;
+
+	FHierarchyNodeSlice Node;
+	Node.LODBounds				= uintBitsToFloat(RawData0);
+	Node.BoxBoundsCenter		= uintBitsToFloat(Misc0.xyz);
+	Node.BoxBoundsExtent		= uintBitsToFloat(Misc1.xyz);
+
+    vec2 unpackedData           = unpackHalf2x16(Misc0.w);
+	Node.MinLODError			= unpackedData.x;
+	Node.MaxParentLODError		= unpackedData.y;
+	Node.ChildStartReference	= Misc1.w;
+	Node.bLoaded				= (Misc1.w != 0xFFFFFFFFu);
+
+	Node.NumChildren			= BitFieldExtractU32(Misc2, NANITE_MAX_CLUSTERS_PER_GROUP_BITS, 0);
+	Node.NumPages				= BitFieldExtractU32(Misc2, NANITE_MAX_GROUP_PARTS_BITS, NANITE_MAX_CLUSTERS_PER_GROUP_BITS);
+	Node.StartPageIndex			= BitFieldExtractU32(Misc2, NANITE_MAX_RESOURCE_PAGES_BITS, NANITE_MAX_CLUSTERS_PER_GROUP_BITS + NANITE_MAX_GROUP_PARTS_BITS);
+	Node.bEnabled				= Misc2 != 0u;
+	Node.bLeaf					= Misc2 != 0xFFFFFFFFu;
+
+	return Node;
+}
+
+// 读取指定 nodeIndex 下的第 childIndex 个切片
+FHierarchyNodeSlice GetHierarchyNodeSlice(uint NodeIndex, uint ChildIndex) {
+    FPackedHierarchyNode packedData = BVH.mData[NodeIndex];
+    const uvec4 RawData0 = packedData.LODBounds[ChildIndex];
+    const uvec4 RawData1 = packedData.Misc0[ChildIndex];
+    const uvec4 RawData2 = packedData.Misc1[ChildIndex];
+    const uint RawData3  = packedData.Misc2[ChildIndex];
+	return UnpackHierarchyNodeSlice(RawData0, RawData1, RawData2, RawData3);
+}
+
+// 根据包围球与摄像机视距，计算屏幕投影缩放尺寸 (投影比例)
+vec2 GetProjectionScales(vec4 Bounds) {
+	if (ProjectionMatrix[3][3] >= 1.0f) {
+		return vec2(1,1);
+	}
+	vec3 Center = Bounds.xyz;
+	float Radius = Bounds.w;
+
+	float ZNear = 10.0f;
+	float DistToClusterSq = dot(Center, Center);
+	
+	float Z = dot(ViewDirectionWS.xyz, Center);
+	float XSq = DistToClusterSq - Z * Z;
+	float X = sqrt(max(0.0f, XSq));
+	float DistToTSq = DistToClusterSq - Radius * Radius;
+	float DistToT = sqrt(max(0.0f, DistToTSq));
+	float ScaledCosTheta = DistToT;
+	float ScaledSinTheta = Radius;
+	float ScaleToUnit = 1.0f / DistToClusterSq;
+	float By = (ScaledSinTheta * X + ScaledCosTheta * Z) * ScaleToUnit;
+	float Ty = (-ScaledSinTheta * X + ScaledCosTheta * Z) * ScaleToUnit;
+	
+	float MinZ = max(Z - Radius, ZNear);
+	float MaxZ = max(Z + Radius, ZNear);
+	float MinCosAngle = Ty;
+	float MaxCosAngle = By;
+
+	if (Z + Radius > ZNear)
+		return vec2(MinZ * MinCosAngle, MaxZ * MaxCosAngle);
+	else
+		return vec2(0.0f, 0.0f);
+}
+
+// Nanite 核心 LOD 判定逻辑：计算 Parent/Child 的 LOD 投影误差，决定是否展开子节点
+bool ShouldVisiteChild(FHierarchyNodeSlice inHierarchyNodeSlice) {
+	vec3 boundingSphere = inHierarchyNodeSlice.LODBounds.xyz;
+	vec4 boundingSphereWS = ModelMatrix * vec4(boundingSphere, 1.0f);
+    boundingSphereWS.xyz = boundingSphereWS.xyz - CameraPositionWS.xyz;
+    
+	vec2 projectionScales = GetProjectionScales(vec4(boundingSphereWS.xyz, inHierarchyNodeSlice.LODBounds.w));
+	float lodScale = CameraPositionWS.w;
+	float threshold = lodScale * inHierarchyNodeSlice.MaxParentLODError;
+	
+	if (projectionScales.x <= threshold) {
+		return true;
+	}
+	return false;
+}
+
+void main() {
+	uint currentClusterCount = CurrentIndirectWorkArgs.mData[1];
+    uint currentNodeOffset = CurrentIndirectWorkArgs.mData[5];
+	uint currentNodeCount = CurrentIndirectWorkArgs.mData[6];
+    
+	uint nextCengNodeIndexOffset = currentNodeOffset + currentNodeCount;
+	uint nextCengNodeCount = 0;
+
+	// 遍历当前层级的所有 BVH 节点
+	for (uint i = 0; i < currentNodeCount; i++) {
+		uint currentNodeIndex = MainAndPostNodeAndClusterBatches.mData[currentNodeOffset + i];
+		for (int j = 0; j < 4; j++) {
+            FHierarchyNodeSlice slice = GetHierarchyNodeSlice(currentNodeIndex, j);
+			bool shouldVisiteChild = ShouldVisiteChild(slice);
+            if (shouldVisiteChild && slice.bEnabled) {
+				if (slice.bLeaf) {
+					// 到达叶子节点：收集叶子节点包含的所有 Cluster 列表到 Batch 缓冲区
+					uint clusterCountInThisLeaf = slice.NumChildren;
+					uint pageIndex = slice.ChildStartReference >> 8;
+					uint clusterOffsetInThisPage = slice.ChildStartReference & 0xFFu;
+					for (int index = 0; index < clusterCountInThisLeaf; index++) {
+						MainAndPostNodeAndClusterBatches.mData[1024 + currentClusterCount * 2] = pageIndex;
+						MainAndPostNodeAndClusterBatches.mData[1024 + currentClusterCount * 2 + 1] = clusterOffsetInThisPage + index;
+						currentClusterCount++; 
+					}
+				} else {
+					// 非叶子节点：压入下一层级节点的待处理队列
+					MainAndPostNodeAndClusterBatches.mData[nextCengNodeIndexOffset + nextCengNodeCount] = slice.ChildStartReference; 
+					nextCengNodeCount++;
+				}
+            }
+        }
+	}
+	// 将计数和节点偏移写入 NextIndirectWorkArgs
+	NextIndirectWorkArgs.mData[1] = currentClusterCount;
+	NextIndirectWorkArgs.mData[5] = nextCengNodeIndexOffset;
+	NextIndirectWorkArgs.mData[6] = nextCengNodeCount;
+}
